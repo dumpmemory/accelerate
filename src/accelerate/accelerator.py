@@ -1675,24 +1675,24 @@ class Accelerator:
                 #   * this attribute will always set by init_utils.init_core_state so its always not None.
                 #   * mixed_precision.param_dtype only regards _fwd_bwd_param_dtype
                 #   * if model is loaded in 16bit, and even if mixed_precision.param_dtype is None,
-                #     we sill want to upcast the flat_param.
+                #     we still want to upcast the flat_param.
                 if self.mixed_precision != "no":  # if mixed precision is set
                     upcasted_log = []
                     for module in FSDP.fsdp_modules(model):
                         # Referencing DeepSpeed Zero3
                         # - in Init, params are converted to 16bit while partitioning.
-                        # - in accelerator.prepare, deepspeed.initalize is called to:
-                        #   * creates the DeepSpeeedEngine.
+                        # - in accelerator.prepare, deepspeed.initialize is called to:
+                        #   * creates the DeepSpeedEngine.
                         #   * since zero_optimization() is True , calls engine._configure_zero_optimizer.
                         #
-                        # Inside the DeepSpeed Zero3 optimizer configuration, which initalizes
+                        # Inside the DeepSpeed Zero3 optimizer configuration, which initializes
                         # DeepSpeedZeroOptimizer_Stage3, during which:
                         #   * trainable_param_groups are obtained from the attached optimizer
                         #     (already partitioned in 16bit).
                         #   * then _setup_for_real_optimizer -> _create_fp32_partitions
                         #     which performs the fp32 upcasting.
 
-                        # To mimick DeepSeepds's casting in FSDP, we look at the (single) FlatParameter held
+                        # To mimic DeepSeepds's casting in FSDP, we look at the (single) FlatParameter held
                         # within an FSDP wrapper. This FlatParameter will be seen by the optimizer.
                         #  - even though there is a torch.device('meta') guard below, we
                         #    expect _init_utils._init_param_handle_from_module to already
@@ -2176,36 +2176,58 @@ class Accelerator:
         only support, IPEX compiled with XPU support and training with XPU pytorch backend available in stock pytorch
         starting from version 2.4.
         """
-        if self.state.use_ipex:
-            if not is_ipex_available():
-                raise ImportError(
-                    "IPEX is not installed or IPEX's version does not match current PyTorch version. Please refer"
-                    " to https://github.com/intel/intel-extension-for-pytorch."
-                )
 
-        model = None
-        optimizer = None
+        # ipex.optimize() is available only for IPEX, both IPEX-CPU and IPEX-XPU
+        if is_ipex_available():
+            import intel_extension_for_pytorch as ipex
+        else:
+            raise ImportError(
+                "IPEX is not installed or IPEX's version does not match current PyTorch version. Please refer"
+                " to https://github.com/intel/intel-extension-for-pytorch."
+            )
+
+        models = []
+        optimizers = []
         result = [obj for obj in args]
-        for obj in result:
+        for i, obj in enumerate(result):
             if isinstance(obj, torch.nn.Module):
                 model = obj
                 model.train()
+                models.append((i, model))
             elif isinstance(obj, (torch.optim.Optimizer)):
-                optimizer = obj
-        if optimizer is not None and model is not None:
-            dtype = torch.bfloat16 if self.state.mixed_precision == "bf16" else None
+                optimizers.append((i, obj))
+
+        # Impossible to determine what to do if multiple models and/or optimizers are provided
+        if len(optimizers) > 1 or (len(models) > 1 and len(optimizers) == 1):
+            raise ValueError(
+                "Prepare with IPEX expects either 1+ models and no optimizer OR a single model-optimizer pair."
+            )
+
+        # Nothing to do
+        if len(models) == 0 and len(optimizers) == 0:
+            return result
+
+        dtype = torch.bfloat16 if self.state.mixed_precision == "bf16" else None
+        # Multiple models and no optimizer (inference) are provided
+        if len(models) > 0 and len(optimizers) == 0:
+            for i, model in models:
+                if self.device.type == "xpu" and next(model.parameters()).device.type == "cpu":
+                    model = model.to(self.device)
+                    model, _ = ipex.optimize(model, optimizer=None, dtype=dtype, inplace=True, level="O1")
+                    # Replace in result
+                    result[i] = model
+
+        # A single model-optimizer pair (training) is provided
+        if len(models) == 1 and len(optimizers) == 1:
+            i_model, model = models[0]
+            i_optimizer, optimizer = optimizers[0]
             if self.device.type == "xpu" and next(model.parameters()).device.type == "cpu":
                 model = model.to(self.device)
-            # ipex.optimize() is available only for IPEX, both IPEX-CPU and IPEX-XPU
-            if is_ipex_available():
-                import intel_extension_for_pytorch as ipex
+            model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=dtype, inplace=True, level="O1")
+            # Replace in result
+            result[i_model] = model
+            result[i_optimizer] = optimizer
 
-                model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=dtype, inplace=True, level="O1")
-        for i in range(len(result)):
-            if isinstance(result[i], torch.nn.Module):
-                result[i] = model
-            elif isinstance(result[i], (torch.optim.Optimizer)):
-                result[i] = optimizer
         return tuple(result)
 
     def _prepare_device_mesh(self):
@@ -3172,7 +3194,7 @@ class Accelerator:
 
         If a `ProjectConfiguration` was passed to the `Accelerator` object with `automatic_checkpoint_naming` enabled
         then checkpoints will be saved to `self.project_dir/checkpoints`. If the number of current saves is greater
-        than `total_limit` then the oldest save is deleted. Each checkpoint is saved in seperate folders named
+        than `total_limit` then the oldest save is deleted. Each checkpoint is saved in separate folders named
         `checkpoint_<iteration>`.
 
         Otherwise they are just saved to `output_dir`.
