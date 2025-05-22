@@ -390,7 +390,7 @@ def set_module_tensor_to_device(
                 device_index = torch.device(device).index if torch.device(device).type == "cuda" else None
                 if not getattr(module.weight, "quant_state", None) and device_index is not None:
                     module.weight = module.weight.cuda(device_index)
-    # clean pre and post foward hook
+    # clean pre and post forward hook
     if device != "cpu":
         clear_device_cache()
 
@@ -441,7 +441,7 @@ def named_module_tensors(
                 yield named_buffer
 
 
-def get_non_persistent_buffers(module: nn.Module, recurse: bool = False):
+def get_non_persistent_buffers(module: nn.Module, recurse: bool = False, fqns: bool = False):
     """
     Gather all non persistent buffers of a given modules into a set
 
@@ -450,12 +450,17 @@ def get_non_persistent_buffers(module: nn.Module, recurse: bool = False):
             The module we want the non persistent buffers on.
         recurse (`bool`, *optional*, defaults to `False`):
             Whether or not to go look in every submodule or just return the direct non persistent buffers.
+        fqns (`bool`, *optional*, defaults to `False`):
+            Whether or not to return the fully-qualified names of the non persistent buffers.
     """
 
     non_persistent_buffers_set = module._non_persistent_buffers_set
     if recurse:
-        for _, m in module.named_modules():
-            non_persistent_buffers_set |= m._non_persistent_buffers_set
+        for n, m in module.named_modules():
+            if fqns:
+                non_persistent_buffers_set |= {n + "." + b for b in m._non_persistent_buffers_set}
+            else:
+                non_persistent_buffers_set |= m._non_persistent_buffers_set
 
     return non_persistent_buffers_set
 
@@ -544,7 +549,7 @@ def check_tied_parameters_on_same_device(tied_params, device_map):
         for param in tie_param:
             tie_param_devices[param] = _get_param_device(param, device_map)
         if len(set(tie_param_devices.values())) > 1:
-            logger.warn(
+            logger.warning(
                 f"Tied parameters are on different devices: {tie_param_devices}. "
                 "Please modify your custom device map or set `device_map='auto'`. "
             )
@@ -1106,7 +1111,7 @@ def _init_infer_auto_device_map(
     module_sizes = compute_module_sizes(model, dtype=dtype, special_dtypes=special_dtypes)
     tied_parameters = find_tied_parameters(model)
     if check_tied_parameters_in_config(model) and len(tied_parameters) == 0:
-        logger.warn(
+        logger.warning(
             "The model weights are not tied. Please use the `tie_weights` method before using the `infer_auto_device` function."
         )
 
@@ -1624,7 +1629,7 @@ def load_state_dict(checkpoint_file, device_map=None):
             weight_names = f.keys()
 
         if metadata is None:
-            logger.warn(
+            logger.warning(
                 f"The safetensors archive passed at {checkpoint_file} does not contain metadata. "
                 "Make sure to save your model with the `save_pretrained` method. Defaulting to 'pt' metadata."
             )
@@ -1842,7 +1847,7 @@ def load_checkpoint_in_model(
     tied_params = find_tied_parameters(model)
 
     if check_tied_parameters_in_config(model) and len(tied_params) == 0:
-        logger.warn(
+        logger.warning(
             "The model weights are not tied. Please use the `tie_weights` method before using the `infer_auto_device` function."
         )
     if device_map is not None:
